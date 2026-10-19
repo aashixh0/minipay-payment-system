@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "phase-*"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  lint-and-test:
+    name: Lint & Test (Python 3.12)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: minipay
+          POSTGRES_PASSWORD: minipay
+          POSTGRES_DB: minipay
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U minipay -d minipay"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+psycopg://minipay:minipay@localhost:5432/minipay
+      API_KEY: ci-test-key
+      API_BASE_URL: http://localhost:8000
+      MQTT_HOST: localhost
+      MQTT_PORT: 1883
+      LOG_LEVEL: WARNING
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Lint (ruff)
+        run: ruff check src/ tests/ tools/
+
+      - name: Run tests with coverage
+        run: pytest --cov=src/minipay --cov-report=term-missing --cov-report=xml tests/
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
