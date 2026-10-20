@@ -10,6 +10,87 @@
 
 ---
 
+## 📌 Project Implementation Status & Phase 2 Kickoff Handoff
+
+> **Current Milestone:** **Phase 1 Completed** (Commit: `feat: phase-1 payment domain and api core`).  
+> **Next Milestone:** **Phase 2: Idempotency and Concurrency Safety**.
+
+### Roadmap Summary
+
+| Phase | Milestone | Status | Key Artifacts & Features |
+|---|---|---|---|
+| **Phase 0** | Project Setup & Scaffold | ✅ Done | Directory tree, config (`pydantic-settings`), DB engine (`SQLAlchemy 2.0`), docker-compose (postgres), Makefile, ruff/pytest config |
+| **Phase 1** | Payment Domain & API Core | ✅ Done | ORM models (`merchants`, `payments`, `payment_events`), State machine pattern (`PaymentState`), MockAcquirer strategy with magic cards (`4242`, `0002`, `0005`, `9995`), repositories (`PaymentRepository`, `MerchantRepository`), `PaymentService`, FastAPI routes (`/v1/payments`, `/v1/merchants`, `/health`, `/ready`), central error handling, comprehensive unit & integration tests |
+| **Phase 2** | Idempotency & Concurrency Safety | ⏳ **NEXT** | `idempotency_keys` table/model, Canonical JSON + SHA-256 hash, insert-first transaction flow, `Idempotency-Key` header requirement, replay headers, 50-request concurrency tests |
+| **Phase 3** | MQTT Pipeline | ⏹ Planned | Mosquitto broker, POS simulator, ingestion queue & worker threads |
+| **Phase 4** | WebSocket Live Dashboard | ⏹ Planned | WebSocket broadcast manager, HTML/JS live dashboard |
+| **Phase 5** | Webhooks & Resilient Delivery | ⏹ Planned | Outbox pattern (`webhook_deliveries`), background worker pool, exponential backoff with full jitter |
+| **Phase 6** | MCP Server & Final Polish | ⏹ Planned | Read-only Model Context Protocol server, full-stack docker-compose, Kubernetes manifests |
+
+---
+
+### 🗺️ Phase 1 Architecture Map (For Phase 2 Quick-Start)
+
+No need to re-read the entire codebase! Here is how Phase 1 components connect:
+
+1. **ORM Models ([`domain/models.py`](src/minipay/domain/models.py))**:
+   - `Merchant`: `id` (PK, string e.g. `m_001`), `name`, `webhook_url`, `webhook_secret`, `created_at`.
+   - `Payment`: `id` (UUID PK), `merchant_id` (FK), `amount_minor` (BigInt > 0), `currency` (ISO-3), `status` (CREATED/AUTHORIZED/CAPTURED/REFUNDED/FAILED), `card_last4`, `terminal_id`, `source_event_id` (unique), `failure_reason`, `version` (int for optimistic locking), `created_at`, `updated_at`.
+   - `PaymentEvent`: Audit trail of transitions (`id`, `payment_id`, `from_status`, `to_status`, `created_at`).
+2. **State Machine ([`domain/state.py`](src/minipay/domain/state.py))**:
+   - `PaymentStatus` enum: `CREATED`, `AUTHORIZED`, `CAPTURED`, `REFUNDED`, `FAILED`.
+   - `PaymentState` subclasses: `CreatedState`, `AuthorizedState`, `CapturedState`, `FailedState`, `RefundedState`.
+   - Illegal transitions raise `IllegalTransition` (maps to HTTP 409 `illegal_transition`).
+3. **Acquirer Strategy ([`domain/acquirer.py`](src/minipay/domain/acquirer.py))**:
+   - `Acquirer` protocol: `authorize`, `capture`, `refund`.
+   - `MockAcquirer` with magic card numbers:
+     - `4242`: Approved for authorization and capture.
+     - `0002`: Declined (`card_declined`).
+     - `0005`: Timeout simulated (`timeout`).
+     - `9995`: Authorized ok, but fails on capture (`capture_failed`).
+4. **Repositories ([`repositories/payments.py`](src/minipay/repositories/payments.py), [`repositories/merchants.py`](src/minipay/repositories/merchants.py))**:
+   - `PaymentRepository`: `add`, `update_status` (appends `PaymentEvent` & bumps `version`), `get`, `list_payments` (cursor-paginated by `created_at` desc), `summary` (counts by status & total captured minor).
+   - `MerchantRepository`: `get`, `add`.
+   - Note: Stubs for `IdempotencyKeyRepository` and `WebhookDeliveryRepository` already exist in [`repositories/`](src/minipay/repositories/).
+5. **Business Logic ([`services/payment_service.py`](src/minipay/services/payment_service.py))**:
+   - `create_payment`: Validates merchant, persists CREATED, calls acquirer, transitions to AUTHORIZED/FAILED, commits in one transaction.
+   - `capture_payment`: Validates payment, handles idempotent replay (if already CAPTURED -> no-op 200), invokes acquirer capture, transitions to CAPTURED or FAILED.
+   - `refund_payment`: Validates payment, handles idempotent replay (if already REFUNDED -> no-op 200), invokes acquirer refund, transitions to REFUNDED.
+   - `get_payment`, `list_payments`, `get_merchant_summary`.
+6. **API Routes ([`api/routers/`](src/minipay/api/routers/)) & App ([`api/main.py`](src/minipay/api/main.py))**:
+   - Auth dependency: `verify_api_key` checks `X-API-Key` against `settings.api_key` (raises 401 `invalid_api_key`).
+   - Central exception handlers map `IllegalTransition` (409), `PaymentNotFoundError` (404), `MerchantNotFoundError` (404), and `RequestValidationError` (400) to standard `{ "error": { "code": "...", "message": "..." } }`.
+   - Routes:
+     - `POST /v1/payments` (201 CREATED)
+     - `GET /v1/payments/{id}` (200 OK or 404)
+     - `GET /v1/payments?merchant_id=...&limit=...&cursor=...` (200 OK)
+     - `POST /v1/payments/{id}/capture` (200 OK or 409)
+     - `POST /v1/payments/{id}/refund` (200 OK or 409)
+     - `GET /v1/merchants/{id}/summary` (200 OK or 404)
+     - `GET /health` (200 OK)
+     - `GET /ready` (200 OK or 503)
+
+---
+
+### 📋 Phase 2 Implementation Guide (Immediate Next Steps)
+
+When starting Phase 2, implement:
+1. **Idempotency Model**: Add `IdempotencyKey` model to `src/minipay/domain/models.py`:
+   - Table: `idempotency_keys` (`id`, `merchant_id`, `key`, `request_hash`, `state` [IN_PROGRESS/COMPLETED], `response_status`, `response_body`, `created_at`, Unique constraint on `merchant_id`, `key`).
+2. **Idempotency Repository**: Implement in `src/minipay/repositories/idempotency.py`:
+   - `try_insert(merchant_id, key, request_hash)` -> returns `(inserted: bool, record: IdempotencyKey)`.
+   - `complete(record, response_status, response_body)`.
+3. **Idempotency Service**: Implement in `src/minipay/services/idempotency.py` per §6.3:
+   - Canonical JSON serializer & SHA-256 hasher.
+   - Insert-first pattern: if unique conflict, inspect existing record (mismatched hash -> 409 `idempotency_key_reused_with_different_payload`, IN_PROGRESS -> 409 `request_in_progress`, COMPLETED -> return cached response with header `Idempotent-Replayed: true`).
+4. **FastAPI Middleware / Router Integration**:
+   - Require `Idempotency-Key` header on `POST /v1/payments` (400 `missing_idempotency_key` if missing).
+5. **Concurrency Test**:
+   - Fire 50 concurrent requests with same key & body -> assert exactly 1 payment created and identical responses.
+   - Fire concurrent request with same key but different body -> 409.
+
+---
+
 ## Table of Contents
 
 1. [Scope](#1-scope)
@@ -578,14 +659,14 @@ ruff check . && pytest
 ### Phase 1: Payment Domain and API Core (Days 2–7)
 
 **Tasks**
-- [ ] ORM models for `merchants`, `payments`, `payment_events` ([§7](#7-data-model)); `create_all` on startup; `tools/seed.py` creating `m_001`, `m_002`.
-- [ ] `domain/state.py`: `PaymentStatus` enum, the State classes, and `IllegalTransition`. **Write unit tests first** for every row of the transition table.
-- [ ] `domain/acquirer.py`: `Acquirer` protocol, `MockAcquirer` with magic card endings, and a factory.
-- [ ] Repositories: `PaymentRepository` (add, get, list with cursor pagination, update with optimistic version check), `MerchantRepository`.
-- [ ] `services/payment_service.py`: `create_payment` (insert CREATED → authorize → set AUTHORIZED/FAILED → write `payment_events`), `capture`, `refund`. One transaction per call.
-- [ ] Pydantic schemas and routers: create, get, list, capture, refund, summary, `/health`, `/ready`.
-- [ ] API-key dependency and the central exception → error-JSON mapping.
-- [ ] Tests: unit tests for state and acquirer; integration tests (TestClient + real Postgres) for each endpoint and for illegal transitions returning 409.
+- [x] ORM models for `merchants`, `payments`, `payment_events` ([§7](#7-data-model)); `create_all` on startup; `tools/seed.py` creating `m_001`, `m_002`.
+- [x] `domain/state.py`: `PaymentStatus` enum, the State classes, and `IllegalTransition`. **Write unit tests first** for every row of the transition table.
+- [x] `domain/acquirer.py`: `Acquirer` protocol, `MockAcquirer` with magic card endings, and a factory.
+- [x] Repositories: `PaymentRepository` (add, get, list with cursor pagination, update with optimistic version check), `MerchantRepository`.
+- [x] `services/payment_service.py`: `create_payment` (insert CREATED → authorize → set AUTHORIZED/FAILED → write `payment_events`), `capture`, `refund`. One transaction per call.
+- [x] Pydantic schemas and routers: create, get, list, capture, refund, summary, `/health`, `/ready`.
+- [x] API-key dependency and the central exception → error-JSON mapping.
+- [x] Tests: unit tests for state and acquirer; integration tests (TestClient + real Postgres) for each endpoint and for illegal transitions returning 409.
 
 **Commands**
 ```bash
