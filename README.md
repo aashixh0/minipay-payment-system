@@ -13,7 +13,8 @@
 ## 📌 Project Implementation Status & Phase 2 Kickoff Handoff
 
 > **Current Milestone:** **Phase 1 Completed** (Commit: `feat: phase-1 payment domain and api core`).  
-> **Next Milestone:** **Phase 2: Idempotency and Concurrency Safety**.
+> **Next Milestone:** **Phase 2: Idempotency and Concurrency Safety**.  
+> 📖 **Full Implementation Documentation:** See [`README_IMPLEMENTATION.md`](README_IMPLEMENTATION.md) for full module-by-module breakdown, design patterns, API tables, and handoff guide.
 
 ### Roadmap Summary
 
